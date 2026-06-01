@@ -106,11 +106,9 @@ All four mechanisms can be ablated independently (see
 COSE/
 ├── absolute_zero_reasoner/
 │   ├── configs/
-│   │   ├── azr_ppo_trainer_general.yaml   # base PPO trainer config
 │   │   └── cose_trainer.yaml              # COSE-specific overlay
 │   ├── data_construction/
 │   │   └── initial_prompt_templates/
-│   │       ├── default.json               # original MAE templates
 │   │       └── seir_4role.json            # COSE 4-role templates
 │   ├── rewards/
 │   │   └── reward_managers.py             # Proposer/Solver/Judge reward + GPT eval
