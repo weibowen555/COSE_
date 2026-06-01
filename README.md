@@ -9,7 +9,6 @@ model and no human-labeled data are needed; all rewards are produced by
 the model itself, with confidence-derived weighting to keep the signal
 robust.
 
-
 ---
 
 ## Table of Contents
@@ -42,7 +41,7 @@ four distinct roles via different prompt templates:
 Question-side and answer-side scores from the same Judge head can be
 emitted either as a *combined* `judge` template (two scores in one
 generation) or as *separate* `judge_question` / `judge_answer` templates.
-The default in the released config is `judge_answer`-only (`train_judge=false`),
+The default in the released config is `judge_answer`-only (`cose.train_judge=false`),
 because the question side is delegated to the Validator.
 
 ---
@@ -79,49 +78,61 @@ $$c_{\text{seq}} \;=\; \mathrm{quantile}_{\alpha}\bigl(\{c_t : t \in \text{outpu
 
 ## Mechanisms
 
-Four mechanisms use the confidence signal:
+Four mechanisms use the confidence signal (all keys live under the
+`cose.cose.*` config namespace):
 
 1. **Quality gate.** Drop the lowest-confidence X% of Proposer outputs
-   before they enter the replay buffer (`cose.gating_enabled`,
-   `gate_bottom_percentile`).
+   before they enter the replay buffer (`cose.cose.gating_enabled`,
+   `cose.cose.gate_bottom_percentile`).
 2. **Curriculum.** Apply a Gaussian sampling weight centred at the
-   median-confidence percentile (`curriculum_enabled`, `curriculum_std`).
+   median-confidence percentile (`cose.cose.curriculum_enabled`,
+   `cose.cose.curriculum_std`).
 3. **Replay priority.** When sampling from the buffer, weight each
    question by $v\cdot c_V\cdot 4p(1-p)$ — Validator score times
    Validator confidence times bell-shaped learnability
-   (`selection_strategy=importance`).
+   (`cose.cose.selection_strategy=importance`).
 4. **Per-sample loss weighting.** Solver and Judge gradients are scaled
    by $w_S = \mathrm{clip}(v\cdot c_V\cdot c_J,\;0.1,\;1)$, so the
    gradients downstream of a low-confidence assessment are softly damped
-   (`weighting_enabled`, `weighting_roles`).
+   (`cose.cose.weighting_enabled`, `cose.cose.weighting_roles`).
 
 All four mechanisms can be ablated independently (see
 [ablations](#ablations--hyperparameter-studies) below).
+
+> **Config note.** COSE's knobs are a nested `cose:` block under the
+> top-level `cose:` namespace in `cose/configs/cose_trainer.yaml`, hence
+> the doubled `cose.cose.*` override paths.
 
 ---
 
 ## Repository layout
 
 ```
-COSE/
-├── absolute_zero_reasoner/
+COSE/Code/
+├── cose/                                  # main package (importable as `cose`)
+│   ├── main_cose.py                       # 4-role self-play entrypoint (Hydra)
 │   ├── configs/
-│   │   └── cose_trainer.yaml              # COSE-specific overlay
+│   │   └── cose_trainer.yaml              # trainer config (top-level `cose:` namespace)
 │   ├── data_construction/
 │   │   └── initial_prompt_templates/
-│   │       └── seir_4role.json            # COSE 4-role templates
+│   │       └── seir_4role.json            # COSE 4-role prompt templates
 │   ├── rewards/
-│   │   └── reward_managers.py             # Proposer/Solver/Judge reward + GPT eval
+│   │   ├── reward_managers.py             # Proposer/Solver/Judge reward + GPT eval
+│   │   ├── cose_reward_manager.py         # confidence-aware reward manager
+│   │   └── cose_confidence.py             # confidence aggregation helpers
 │   ├── trainer/
 │   │   └── ppo/
 │   │       ├── cose_ray_trainer.py        # 4-role training loop
 │   │       ├── cose_dataset_manager.py    # replay buffer + priority sampling
+│   │       ├── base_ray_trainer.py        # base self-play trainer (Code/General-IO)
 │   │       └── reason_rl_ray_trainer.py   # base reasoning trainer
 │   └── utils/
-│       └── benchmark_config.py            # 19-benchmark suite registry
+│       └── benchmark_config.py            # benchmark suite registry (20 default benchmarks)
 ├── data/
-│   └── code_reason/test_answer.parquet    # shared train+val parquet
-├── validation_datasets/                   # 19 per-benchmark *_test.parquet files
+│   ├── code_reason/test_answer.parquet    # shared train+val parquet
+│   └── *_seed_io.jsonl                     # per-backbone seed pools
+├── validation_datasets/                   # 23 per-benchmark *_test.parquet files
+├── evaluation/                            # math_eval + code_eval (evalplus / LiveCodeBench)
 ├── scripts/
 │   ├── selfplay/
 │   │   ├── cose_0.6b.sh                   # Qwen3-0.6B canonical launcher
@@ -130,8 +141,8 @@ COSE/
 │   │   ├── cose_llama3.2_3b.sh            # Llama-3.2-3B-Instruct
 │   │   └── cose_val_only.sh               # standalone benchmark eval
 │   └── evaluation/
-│       └── eval_baselines.sh              # sweep launcher: AZR / R-Zero / COSE
-├── outputs/                               # Hydra working-dir captures
+│       └── eval_baselines.sh              # cross-framework sweep launcher
+├── outputs/                               # Hydra working-dir captures (generated at runtime)
 └── README.md
 ```
 
@@ -148,11 +159,11 @@ python3.10 -m venv ${SEIR_ROOT}/seir_env
 source ${SEIR_ROOT}/seir_env/bin/activate
 pip install --upgrade pip
 
-# 2. Install the verl fork (intrinsic-signals branch) and the AZR submodule
+# 2. Install the verl fork (intrinsic-signals branch) and the COSE package
 cd ${SEIR_ROOT}/verl-confidence-signal && pip install -e .
-cd ${SEIR_ROOT}/COSE                       && pip install -e .
+cd ${SEIR_ROOT}/COSE/Code               && pip install -e .
 
-# 3. Pin evalplus to AZR's compatible commit
+# 3. Pin evalplus to the compatible commit
 pip install --no-deps git+https://github.com/evalplus/evalplus.git@d362e933
 pip install "setuptools<81" stopit
 
@@ -164,6 +175,9 @@ Environment variables (set once in `~/.bashrc` or pass via `sbatch --export`):
 
 ```bash
 export SEIR_ROOT=/scratch/$USER/SEIR
+export COSE_DIR=${SEIR_ROOT}/COSE/Code
+# Optional: original Absolute-Zero-Reasoner checkout, reused for FSDP merging / code eval
+export AZR_DIR=${SEIR_ROOT}/Absolute-Zero-Reasoner
 export WANDB_API_KEY=<YOUR_WANDB_API_KEY>
 # OpenAI key for the gpt-4.1-nano benchmark judge
 echo 'sk-…' > ~/.openai_token && chmod 600 ~/.openai_token
@@ -180,7 +194,7 @@ echo 'hf_…' > ~/.hf_token && chmod 600 ~/.hf_token
 # Launch the canonical COSE run on Qwen3-0.6B (4 × A100 80GB, ~24 h)
 sbatch ${COSE_DIR}/scripts/selfplay/cose_0.6b.sh
 
-# Evaluate a checkpoint on the 19-benchmark reasoning + math suite
+# Evaluate a checkpoint on the reasoning + math benchmark suite
 MODEL=${COSE_DIR}/checkpoints/COSE_0.6B_…/global_step_100/actor/huggingface \
   sbatch ${COSE_DIR}/scripts/selfplay/cose_val_only.sh
 ```
@@ -222,13 +236,15 @@ CONFIDENCE_SIGNAL=self_certainty  sbatch ${COSE_DIR}/scripts/selfplay/cose_llama
 
 ## Evaluation
 
-### Reasoning + math suite (19 benchmarks, gpt-4.1-nano judge)
+### Reasoning + math suite (20 benchmarks, gpt-4.1-nano judge)
 
 A single checkpoint goes through `cose_val_only.sh`, which runs the same
 benchmark pipeline as the in-training `val/benchmark_accuracy/*` metrics
 but with `benchmark_max_samples=500` instead of the in-training default
 (100). Output: a single `step:0 - val/benchmark_accuracy/...` line that
-contains per-benchmark accuracies.
+contains per-benchmark accuracies. The default benchmark set is defined in
+`cose/utils/benchmark_config.py`; the `validation_datasets/` directory
+holds 23 per-benchmark `*_test.parquet` files.
 
 ```bash
 # Evaluate a trained COSE checkpoint
@@ -271,8 +287,8 @@ first run `merge_fsdp_for_eval.sh` to materialise HuggingFace safetensors.
 
 | Variant | Switch |
 |---|---|
-| `(A)` w/o confidence weighting | `azr.cose.weighting_enabled=False` |
-| `(B)` w/o confidence priority | `azr.cose.selection_strategy=uniform` |
+| `(A)` w/o confidence weighting | `cose.cose.weighting_enabled=False` |
+| `(B)` w/o confidence priority | `cose.cose.selection_strategy=uniform` |
 | `(C)` linear $1-p$ learnability | env var `COSE_LEARNABILITY=linear` |
 
 Convenience launchers:
@@ -312,7 +328,7 @@ COSE builds directly on:
 - **R-Zero**, **Multi-Agent Evolve (MAE)** — the closest related
   self-evolving baselines we compare against
 
-The 19-benchmark evaluation suite and the gpt-4.1-nano-based judge
+The benchmark evaluation suite and the gpt-4.1-nano-based judge
 infrastructure are inherited from AZR; we use them unchanged so that
 COSE numbers are directly comparable to published AZR / R-Zero / MAE
 numbers.
